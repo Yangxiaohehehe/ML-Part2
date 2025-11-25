@@ -1,11 +1,16 @@
 # =====================================================================================
 # A. SCRIPT SETUP & IMPORTS
 # =====================================================================================
-import argparse
 import os
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+import argparse
 import pickle
 from datasets import load_dataset
 from transformers import AutoTokenizer
+
 
 # =====================================================================================
 # B. CORE DATA PREPARATION FUNCTION
@@ -13,14 +18,14 @@ from transformers import AutoTokenizer
 
 
 def prepare_tokenize_and_save(
-    dataset_name: str,
-    tokenizer_name: str,
-    prompt_column: str,
-    response_column: str,
-    max_length: int,
-    num_proc: int,
-    debug_mode: bool,
-    output_dir: str,
+        dataset_name: str,
+        tokenizer_name: str,
+        prompt_column: str,
+        response_column: str,
+        max_length: int,
+        num_proc: int,
+        debug_mode: bool,
+        output_dir: str,
 ) -> None:
     """
     Handles the entire data pipeline: loading, tokenizing, splitting,
@@ -63,34 +68,40 @@ def prepare_tokenize_and_save(
         prompts = examples[prompt_column]
         responses = examples[response_column]
 
-        # TODO:
-        # We need to convert the chat templates to strings first to use the main tokenizer call
+        # Modification 1: Add instruction string to user content
         full_chats = [
             [
-                {"role": "user", "content": p + XXX},
+                {"role": "user",
+                 "content": p + "\nPlease reason step by step, and put your final answer within \\boxed{}."},
                 {"role": "assistant", "content": r},
             ]
             for p, r in zip(prompts, responses)
         ]
+
+        # Modification 2: Apply chat template to full chats
         full_texts = [
-            tokenizer.apply_chat_template(conversation=XXX,
+            tokenizer.apply_chat_template(conversation=chat,
                                           tokenize=False,
                                           add_generation_prompt=False,
                                           enable_thinking=False)
-            for XXX in XXX
+            for chat in full_chats
         ]
-
 
         # Tokenize prompts separately to calculate their length for masking
+        # Modification 3: Add instruction string to prompt-only content (Consistency)
         prompt_only_chats = [
-            [{"role": "user", "content": p + XXX}] for p in prompts
+            [{"role": "user",
+              "content": p + "\nPlease reason step by step, and put your final answer within \\boxed{}."}] for p in
+            prompts
         ]
+
+        # Modification 4: Apply chat template to prompt-only chats
         prompt_texts = [
-            tokenizer.apply_chat_template(conversation=XXX,
+            tokenizer.apply_chat_template(conversation=chat,
                                           tokenize=False,
                                           add_generation_prompt=True,
                                           enable_thinking=False)
-            for XXX in XXX
+            for chat in prompt_only_chats
         ]
 
         # Use the tokenizer's main `__call__` method to get input_ids AND attention_mask
@@ -109,7 +120,8 @@ def prepare_tokenize_and_save(
         for i, full_ids in enumerate(tokenized_outputs["input_ids"]):
             prompt_len = len(tokenized_prompts["input_ids"][i])
             label = list(full_ids)  # Copy input_ids
-            label[:XXX] = [-100] * XXX  # Mask prompt when calculating loss
+            # Modification 5: Set mask using prompt_len
+            label[:prompt_len] = [-100] * prompt_len  # Mask prompt when calculating loss
             labels_list.append(label)
 
         # Add labels to our dictionary
@@ -191,7 +203,7 @@ def prepare_tokenize_and_save(
 
 def main():
     parser = argparse.ArgumentParser(description="Flexible SFT Data Preparation Script")
-    
+
     parser.add_argument(
         "--output_dir",
         type=str,
