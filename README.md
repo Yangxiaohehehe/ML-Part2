@@ -21,3 +21,15 @@ finetune.py
 在 500 条测试数据上的得分
 比较前后的得分 
 
+评估过程中分别测试了不同maxtokens 以及 温度的效果实验
+
+
+### 评估部分的内容
+out_jsonl是利用rollout运行完的答案
+out_score是利用eval文件跑出分数后的jsonl结果
+
+更改了eval文件可以读取整个文件夹并生成文件夹结果：eval.py
+
+
+### 评估过程中问题报错
+各种包的问题 需要根据缺什么 去github找到对应的 pip即可

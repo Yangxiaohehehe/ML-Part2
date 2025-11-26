@@ -3,6 +3,8 @@ import pickle
 import argparse
 from tqdm import tqdm
 
+import csv
+
 import torch
 import torch.optim as optim
 import numpy as np
@@ -15,6 +17,7 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model
 
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 def set_seed(seed):
     random.seed(seed)
@@ -99,19 +102,43 @@ class SmartDataCollator:
 def main():
     args = get_args()
 
+    #change the output name to unique when training but not cover
+    if args.optimization_method == 'lora':
+        unique_output_name = f"{args.optimization_method}_{args.lora_rank}_lr{args.learning_rate:.1e}_ep{args.num_epochs}"
+    else:
+        unique_output_name = f"{args.optimization_method}_lr{args.learning_rate:.1e}_ep{args.num_epochs}"
+
     # Derived paths
     current_file_path = os.path.abspath(__file__)
     script_dir = os.path.dirname(current_file_path)
     data_dir = os.path.join(script_dir, args.data_dir)
     train_data_path = os.path.join(data_dir, 'train.pkl')
     val_data_path = os.path.join(data_dir, 'val.pkl')
-    output_dir = os.path.join(script_dir, args.output_dir)
 
+    #output got changed
+    output_dir_base = os.path.join(script_dir, "out")
+    output_dir = os.path.join(output_dir_base, unique_output_name)
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # store the training logs
+    log_file_path = os.path.join(output_dir, "training_metrics.csv")
+
+    #initialize the CSV recorder
+    with open(log_file_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['global_step', 'type', 'loss', 'max_gpu_mem_gb'])
 
     print(f"Loading model and tokenizer from {args.model_name}...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
 
+    # GPU
+    max_memory_allocated_bytes = 0 
+    if device == 'cuda':
+        torch.cuda.reset_peak_memory_stats(device)
+    
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
@@ -145,14 +172,14 @@ def main():
 
     # TODO: Apply different optimizer
     if args.optimization_method == "adam":
-        optimizer = optim.XXX(
+        optimizer = optim.AdamW(
             model.parameters(),
             lr=args.learning_rate,
             weight_decay=args.weight_decay,
             betas=(args.beta1, args.beta2)
         )
     elif args.optimization_method == "sgd":
-        optimizer = optim.XXX(
+        optimizer = optim.SGD(
             model.parameters(),
             lr=args.learning_rate,
             weight_decay=args.weight_decay
@@ -165,7 +192,7 @@ def main():
             bias="none",
             lora_dropout=0.05,
             task_type="CAUSAL_LM",
-            target_modules=[XXX], # Apply Lora to all possible modules
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], # Apply Lora to all possible modules
         )
         model = get_peft_model(model, lora_config)
         trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -198,8 +225,21 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad()
                 global_step += 1
+
+                #record GPU data
+                if device == 'cuda':
+                    current_max_mem = torch.cuda.max_memory_allocated(device)
+                    max_memory_allocated_bytes = max(max_memory_allocated_bytes, current_max_mem)
+                    
                 if global_step % args.log_interval == 0:
-                    print(f"Step {global_step}: Train Loss = {loss.item() * args.grad_accumulation_steps:.4f}")
+                    # print(f"Step {global_step}: Train Loss = {loss.item() * args.grad_accumulation_steps:.4f}")
+                    train_loss_item = loss.item() * args.grad_accumulation_steps
+                    print(f"Step {global_step}: Train Loss = {train_loss_item:.4f}")
+                    # store loss in csv
+                    with open(log_file_path, mode='a', newline='') as file:
+                        writer = csv.writer(file)
+                        writer.writerow([global_step, 'train', train_loss_item, max_memory_allocated_bytes / (1024**3)])
+                    
                 if global_step % args.eval_interval == 0:
                     model.eval()
                     print("\nRunning validation...")
@@ -213,6 +253,13 @@ def main():
                             total_val_loss += val_loss.item()
                     avg_val_loss = total_val_loss / len(val_loader)
                     print(f"Step {global_step}: Validation Loss = {avg_val_loss:.4f}")
+
+                    # store validation loss to csv
+                    with open(log_file_path, mode='a', newline='') as file:
+                        writer = csv.writer(file)
+                        writer.writerow([global_step, 'val', avg_val_loss, max_memory_allocated_bytes / (1024**3)])
+
+                        
                     if avg_val_loss < best_val_loss:
                         best_val_loss = avg_val_loss
                         print(f"  -> New best validation loss! Saving model to {output_dir}")
@@ -239,6 +286,13 @@ def main():
     else:
         print(f"  -> An earlier checkpoint was better (Val Loss: {best_val_loss:.4f}). Final model not saved.")
 
+    # 打印最大显存使用量
+    max_mem_gb = max_memory_allocated_bytes / (1024**3)
+    print("\n" + "="*50)
+    print(f"Optimization Method: {args.optimization_method}")
+    print(f"MAXIMUM ALLOCATED GPU MEMORY: {max_mem_gb:.2f} GB")
+    print("="*50)
+    
     print(f"\nProcess complete. Best model is saved in {output_dir}")
 
 if __name__ == '__main__':
